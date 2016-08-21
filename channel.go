@@ -1,6 +1,9 @@
 package gorecon
 
-import "errors"
+import (
+	"encoding/json"
+	"errors"
+)
 
 // Channel has methods to read and set current speed and temperatures
 type Channel struct {
@@ -14,6 +17,36 @@ type Channel struct {
 	dirty       bool      // Whether something has changed since last check
 	init        byte      // Bitmap for channel initialization status
 	change      chan bool // Channel for change updates
+}
+
+// ChannelExport ...
+type ChannelExport struct {
+	Speed       int `json:"speed"`
+	MaxSpeed    int `json:"max_speed"`
+	ManualSpeed int `json:"manual_speed"`
+	TempF       int `json:"temp_f"`
+	TempC       int `json:"temp_c"`
+	AlarmTempF  int `json:"alarm_temp_f"`
+	AlarmTempC  int `json:"alarm_temp_c"`
+}
+
+// MarshalJSON ...
+func (c *Channel) MarshalJSON() ([]byte, error) {
+
+	return json.Marshal(c.Export())
+}
+
+// Export ...
+func (c *Channel) Export() *ChannelExport {
+	return &ChannelExport{
+		Speed:       c.Speed(),
+		MaxSpeed:    c.MaxSpeed(),
+		ManualSpeed: c.ManualSpeed(),
+		TempF:       c.TempF(),
+		TempC:       c.TempC(),
+		AlarmTempF:  c.AlarmTempF(),
+		AlarmTempC:  c.AlarmTempC(),
+	}
 }
 
 // NewChannel returns the a new channel with defaults set

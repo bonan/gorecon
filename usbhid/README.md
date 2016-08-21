@@ -1,0 +1,1 @@
+UsbHid is a wrapper around [github.com/zserge/hid](https://github.com/zserge/hid) to implement [io.ReadWriter](https://godoc.org/io#ReadWriter)

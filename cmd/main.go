@@ -11,9 +11,10 @@ package main
 import (
 	//"encoding/hex"
 
-	"fmt"
 	"log"
 	"net/http"
+
+	"encoding/json"
 
 	"github.com/bonan/gorecon"
 	"github.com/bonan/gorecon/usbhid"
@@ -23,9 +24,27 @@ var reconDevices map[int]*gorecon.Device
 
 func main() {
 
-	usbDevices := usbhid.Scan(0x0c45, 0x7100)
-
 	reconDevices = map[int]*gorecon.Device{}
+
+	rescan()
+	fs := http.FileServer(http.Dir("ui"))
+
+	http.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		dat, err := json.MarshalIndent(reconDevices, "", "  ")
+		if err != nil {
+			w.WriteHeader(500)
+			return
+		}
+		w.Write(dat)
+	})
+	http.Handle("/", fs)
+	http.ListenAndServe(":8080", nil)
+}
+
+func rescan() {
+	usbDevices := usbhid.Scan(0x0c45, 0x7100)
 
 	for i, usb := range usbDevices {
 		go func(i int, usb *usbhid.UsbHid) {
@@ -38,32 +57,7 @@ func main() {
 			if err := dev.Start(); err != nil {
 				log.Println("Error while starting device:", err)
 			}
-			reconDevices[i] = nil
+			delete(reconDevices, i)
 		}(i, usb)
 	}
-
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		html := "<table><tr><th>Device</th><th>Ch</th><th>Temp</th><th>Speed</th><th>MaxSpeed</th><th>ManualSpeed</th><th>AlarmTemp</th></tr>"
-
-		for deviceID, recon := range reconDevices {
-			if !recon.IsStarted() || !recon.IsInitialized() {
-				continue
-			}
-			for channelID, channel := range recon.Channels {
-				html = html + "<tr>"
-				html = html + fmt.Sprintf("<td>%d</td>", deviceID)
-				html = html + fmt.Sprintf("<td>%d</td>", channelID)
-				html = html + fmt.Sprintf("<td>%d</td>", channel.TempC())
-				html = html + fmt.Sprintf("<td>%d</td>", channel.Speed())
-				html = html + fmt.Sprintf("<td>%d</td>", channel.MaxSpeed())
-				html = html + fmt.Sprintf("<td>%d</td>", channel.ManualSpeed())
-				html = html + fmt.Sprintf("<td>%d</td>", channel.AlarmTempC())
-				html = html + "</tr>"
-			}
-		}
-		html = html + "</table>"
-		w.Write([]byte(html))
-	})
-
-	http.ListenAndServe(":8080", nil)
 }

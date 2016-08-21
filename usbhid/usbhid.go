@@ -36,11 +36,15 @@ func (u *UsbHid) Read(p []byte) (n int, err error) {
 	if !u.open {
 		return 0, io.ErrClosedPipe
 	}
-	data, err := u.device.Read(len(p), 1*time.Second)
+	l := len(p)
+	data, err := u.device.Read(l, 1*time.Second)
 	if err != nil {
 		return 0, err
 	}
 	for i, v := range data {
+		if l-1 < i {
+			break
+		}
 		p[i] = v
 	}
 	return len(data), nil
@@ -72,7 +76,8 @@ func (u *UsbHid) Start() error {
 }
 
 // Close ...
-func (u *UsbHid) Close() {
+func (u *UsbHid) Close() error {
 	u.open = false
 	u.device.Close()
+	return nil
 }

@@ -1,6 +1,7 @@
 package gorecon
 
 import (
+	"encoding/json"
 	"errors"
 	"io"
 	"log"
@@ -9,17 +10,53 @@ import (
 
 // Device represents a Bitfinex Recon device
 type Device struct {
-	device   io.ReadWriter
-	started  bool
-	queue    chan *request
-	stop     chan bool
-	change   chan bool
-	report   chan *Report
-	init     byte
-	Channels map[int]*Channel
+	device         io.ReadWriter
+	started        bool
+	queue          chan *request
+	stop           chan bool
+	change         chan bool
+	report         chan *Report
+	init           byte
+	curSetting     byte
+	targetSetting  byte
+	displayChannel uint8
+	Channels       []*Channel
 }
 
+// DeviceExport ...
+type DeviceExport struct {
+	Audio          bool             `json:"audio"`
+	Manual         bool             `json:"manual"`
+	TempMode       string           `json:"temp_mode"`
+	DisplayChannel int              `json:"display_channel"`
+	Channels       []*ChannelExport `json:"channels"`
+}
+
+// Report ...
 type Report struct {
+}
+
+// MarshalJSON ...
+func (r *Device) MarshalJSON() ([]byte, error) {
+	return json.Marshal(r.Export())
+}
+
+// Export ...
+func (r *Device) Export() *DeviceExport {
+	e := &DeviceExport{
+		Audio:          r.IsAudioEnabled(),
+		Manual:         r.IsManual(),
+		TempMode:       "F",
+		DisplayChannel: r.DisplayChannel(),
+		Channels:       []*ChannelExport{},
+	}
+	if !r.IsTempF() {
+		e.TempMode = "C"
+	}
+	for _, c := range r.Channels {
+		e.Channels = append(e.Channels, c.Export())
+	}
+	return e
 }
 
 // NewDevice initializes a device, optional second argument is a channel for
@@ -52,12 +89,12 @@ func (r *Device) Start() error {
 	if r.started {
 		return errors.New("Device polling is already started")
 	}
-	r.Channels = map[int]*Channel{
-		0: NewChannel(r.change),
-		1: NewChannel(r.change),
-		2: NewChannel(r.change),
-		3: NewChannel(r.change),
-		4: NewChannel(r.change),
+	r.Channels = []*Channel{
+		NewChannel(r.change),
+		NewChannel(r.change),
+		NewChannel(r.change),
+		NewChannel(r.change),
+		NewChannel(r.change),
 	}
 	r.started = true
 
@@ -122,16 +159,72 @@ func (r *Device) IsInitialized() bool {
 	return true
 }
 
+// SetTempF ...
+func (r *Device) SetTempF(b bool) {
+	r.targetSetting = r.targetSetting ^ settingFarenheit
+	if b {
+		r.targetSetting = r.targetSetting | settingFarenheit
+	}
+	r.change <- true
+}
+
+// SetManual ...
+func (r *Device) SetManual(b bool) {
+	r.targetSetting = r.targetSetting ^ settingManual
+	if b {
+		r.targetSetting = r.targetSetting | settingManual
+	}
+	r.change <- true
+}
+
+// SetAudioEnabled ...
+func (r *Device) SetAudioEnabled(b bool) {
+	r.targetSetting = r.targetSetting ^ settingAudio
+	if b {
+		r.targetSetting = r.targetSetting | settingAudio
+	}
+	r.change <- true
+}
+
+// IsTempF ...
+func (r *Device) IsTempF() bool {
+	if r.curSetting&settingFarenheit == settingFarenheit {
+		return true
+	}
+	return false
+}
+
+// IsManual ...
+func (r *Device) IsManual() bool {
+	if r.curSetting&settingManual == settingManual {
+		return true
+	}
+	return false
+}
+
+// IsAudioEnabled ...
+func (r *Device) IsAudioEnabled() bool {
+	if r.curSetting&settingAudio == settingAudio {
+		return true
+	}
+	return false
+}
+
+// DisplayChannel ...
+func (r *Device) DisplayChannel() int {
+	return int(r.displayChannel)
+}
+
 func (r *Device) requestStatus() {
-	r.queue <- &request{ControlByte: getDeviceStatus}
-	r.queue <- &request{ControlByte: getDeviceSettings}
-	r.queue <- &request{ControlByte: getCurrentChannel}
+	r.queue <- &request{ControlByte: reqDeviceStatus}
+	r.queue <- &request{ControlByte: reqDeviceSettings}
+	r.queue <- &request{ControlByte: reqDisplayChannel}
 }
 
 func (r *Device) requestSpeedAndTemp() {
 	for i := range r.Channels {
 		if i >= 0 && i < 5 {
-			r.queue <- &request{ControlByte: getTempAndSpeedChannel0 + byte(i)}
+			r.queue <- &request{ControlByte: reqTempAndSpeed + byte(i)}
 		}
 	}
 }
@@ -139,7 +232,7 @@ func (r *Device) requestSpeedAndTemp() {
 func (r *Device) requestManualSettings() {
 	for i := range r.Channels {
 		if i >= 0 && i < 5 {
-			r.queue <- &request{ControlByte: getAlarmAndSpeedChannel0 + byte(i)}
+			r.queue <- &request{ControlByte: reqAlarmAndSpeed + byte(i)}
 		}
 	}
 }
@@ -170,49 +263,58 @@ func (r *Device) checkForChanges() {
 		if channel.dirty {
 			req := &request{
 				Length:      3,
-				ControlByte: setAlarmAndSpeedChannel0 + byte(id),
+				ControlByte: setAlarmAndSpeed + byte(id),
 				Data:        make([]byte, 3)}
 
 			req.Data[0] = byte(channel.targetAlarm)
 			req.Data[1], req.Data[2] = rpm2byte(channel.targetSpeed)
 			r.queue <- req
 			channel.dirty = false
-			r.queue <- &request{ControlByte: getAlarmAndSpeedChannel0 + byte(id)}
+			r.queue <- &request{ControlByte: reqAlarmAndSpeed + byte(id)}
 		}
+	}
+	if r.curSetting != r.targetSetting {
+		r.queue <- &request{
+			ControlByte: setDeviceSettings,
+			Data:        []byte{r.targetSetting},
+		}
+		r.curSetting = r.targetSetting
 	}
 }
 
 func (r *Device) handleInput(req *request) {
-	if req.ControlByte&0xf0 == readTempAndSpeedChannel0 {
+	if req.ControlByte&0xf0 == recvTempAndSpeed {
 		channel := int(req.ControlByte & 0x0f)
-		if ch, ok := r.Channels[channel]; ok {
-			ch.report(req.Data)
+		if channel < len(r.Channels) {
+			r.Channels[channel].report(req.Data)
 		}
 		return
 	}
-	if req.ControlByte&0xf0 == readAlarmAndSpeedChannel0 {
+	if req.ControlByte&0xf0 == recvAlarmAndSpeed {
 		channel := int(req.ControlByte & 0x0f)
-		if ch, ok := r.Channels[channel]; ok {
-			ch.reportAlarm(req.Data)
+		if channel < len(r.Channels) {
+			r.Channels[channel].reportAlarm(req.Data)
 		}
 		return
 	}
-	switch req.ControlByte {
-	case readDeviceStatus:
-		if r.init&0x01 == 0 {
-			r.init = r.init | 0x01
-		}
-		log.Println("Device status", req)
-	case readDeviceSettings:
-		if r.init&0x02 == 0 {
-			r.init = r.init | 0x02
-		}
-		log.Println("Device settings", req)
-	case readCurrentChannel:
+	if req.ControlByte&0xf0 == setDisplayChannel {
 		if r.init&0x04 == 0 {
 			r.init = r.init | 0x04
 		}
-		log.Println("Current channel", req)
+		channel := int(req.ControlByte & 0x0f)
+		r.displayChannel = uint8(channel)
+		return
+	}
+	switch req.ControlByte {
+	case recvDeviceStatus:
+		if r.init&0x01 == 0 {
+			r.init = r.init | 0x01
+		}
+	case recvDeviceSettings:
+		if r.init&0x02 == 0 {
+			r.init = r.init | 0x02
+		}
+		r.curSetting = req.Data[0]
 	default:
 		log.Println("Unknown data received", req)
 	}
